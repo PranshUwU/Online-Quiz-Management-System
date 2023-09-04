@@ -1,0 +1,338 @@
+#include <iostream>
+#include <vector>
+#include <string>
+#include <sqlite3.h> 
+using namespace std;
+
+sqlite3* db = nullptr; 
+
+// Initialize the SQLite database
+void initDatabase() {
+    int rc = sqlite3_open("quiz_data.db", &db);
+    if (rc) {
+        cerr << "Error opening the database: " << sqlite3_errmsg(db) << endl;
+        exit(1);
+    }
+}
+
+// Close the SQLite database using a destructor
+class DatabaseCloser {
+public:
+    ~DatabaseCloser() {
+        sqlite3_close(db);
+    }
+};
+
+DatabaseCloser closer; // Database will be closed automatically when it goes out of scope
+
+// User Registration and Authentication Functions using SQL
+
+bool isUserExist(const string& username) {
+    string query = "SELECT COUNT(*) FROM users WHERE username = '" + username + "';";
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        cerr << "SQL error: " << sqlite3_errmsg(db) << endl;
+        return false;
+    }
+
+    int result = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        result = sqlite3_column_int(stmt, 0);
+    }
+
+    sqlite3_finalize(stmt);
+    return result > 0;
+}
+
+bool registerUser(const string& username, const string& password) {
+    if (!isUserExist(username)) {
+        string query = "INSERT INTO users (username, password) VALUES ('" + username + "', '" + password + "');";
+        char* errMsg;
+        int rc = sqlite3_exec(db, query.c_str(), nullptr, nullptr, &errMsg);
+        if (rc != SQLITE_OK) {
+            cerr << "SQL error: " << errMsg << endl;
+            sqlite3_free(errMsg);
+            return false;
+        }
+        return true; // Registration successful
+    }
+    return false; // User already exists
+}
+
+bool loginUser(const string& username, const string& password) {
+    string query = "SELECT COUNT(*) FROM users WHERE username = '" + username + "' AND password = '" + password + "';";
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        cerr << "SQL error: " << sqlite3_errmsg(db) << endl;
+        return false;
+    }
+
+    int result = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) {
+        result = sqlite3_column_int(stmt, 0);
+    }
+
+    sqlite3_finalize(stmt);
+    return result > 0;
+}
+
+// Quiz Creation Functions
+
+void addQuestionToQuiz(int quizId, const string& questionText, const vector<string>& options, int correctOption) {
+    string query = "INSERT INTO questions (quiz_id, question_text, options, correct_option) VALUES (" + to_string(quizId) + ", '" + questionText + "', '";
+    for (const string& option : options) {
+        query += option + "|";
+    }
+    query += "', " + to_string(correctOption) + ");";
+    char* errMsg;
+    int rc = sqlite3_exec(db, query.c_str(), nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        cerr << "SQL error: " << errMsg << endl;
+        sqlite3_free(errMsg);
+    }
+}
+
+
+// Quiz Taking Function using SQL
+
+int takeQuiz(int quizId, const string& username) {
+    
+    string selectQuizQuery = "SELECT title FROM quizzes WHERE quiz_id = " + to_string(quizId) + ";";
+    sqlite3_stmt* stmtQuiz;
+    int rcQuiz = sqlite3_prepare_v2(db, selectQuizQuery.c_str(), -1, &stmtQuiz, nullptr);
+    if (rcQuiz != SQLITE_OK) {
+        cerr << "SQL error: " << sqlite3_errmsg(db) << endl;
+        sqlite3_finalize(stmtQuiz);
+        return -1;
+    }
+
+    string quizTitle;
+    if (sqlite3_step(stmtQuiz) == SQLITE_ROW) {
+        quizTitle = reinterpret_cast<const char*>(sqlite3_column_text(stmtQuiz, 0));
+    } else {
+        cerr << "Quiz not found." << endl;
+        sqlite3_finalize(stmtQuiz);
+        return -1;
+    }
+
+    sqlite3_finalize(stmtQuiz);
+
+    string selectQuestionsQuery = "SELECT question_id, question_text, options, correct_option FROM questions WHERE quiz_id = " + to_string(quizId) + ";";
+    sqlite3_stmt* stmtQuestions;
+    int rcQuestions = sqlite3_prepare_v2(db, selectQuestionsQuery.c_str(), -1, &stmtQuestions, nullptr);
+    if (rcQuestions != SQLITE_OK) {
+        cerr << "SQL error: " << sqlite3_errmsg(db) << endl;
+        sqlite3_finalize(stmtQuestions);
+        return -1;
+    }
+
+    int score = 0;
+    cout << "Quiz Title: " << quizTitle << endl;
+
+     vector<string> options;
+
+    while (sqlite3_step(stmtQuestions) == SQLITE_ROW) {
+        int questionId = sqlite3_column_int(stmtQuestions, 0);
+        string questionText = reinterpret_cast<const char*>(sqlite3_column_text(stmtQuestions, 1));
+        string optionsText = reinterpret_cast<const char*>(sqlite3_column_text(stmtQuestions, 2));
+        int correctOption = sqlite3_column_int(stmtQuestions, 3);
+
+        vector<string> options; // Define the options vector
+
+        size_t start = 0;
+        size_t end = optionsText.find('|');
+        while (end != string::npos) {
+            options.push_back(optionsText.substr(start, end - start));
+            start = end + 1;
+            end = optionsText.find('|', start);
+        }
+
+        cout << "Question: " << questionText << endl;
+        for (int i = 0; i < options.size(); ++i) {
+            cout << i + 1 << ". " << options[i] << endl;
+        }
+
+        int userChoice;
+        cout << "Enter your choice (1-" << options.size() << "): ";
+        cin >> userChoice;
+
+        if (userChoice == correctOption) {
+            score++;
+        }
+
+        cout << "Your score: " << score << " out of " << options.size() << endl;
+        return score;
+    }
+
+    sqlite3_finalize(stmtQuestions);
+
+    // Insert the quiz result into the database
+    string insertResultQuery = "INSERT INTO quiz_results (username, quiz_id, score) VALUES ('" + username + "', " + to_string(quizId) + ", " + to_string(score) + ");";
+    char* errMsg;
+    int rcResult = sqlite3_exec(db, insertResultQuery.c_str(), nullptr, nullptr, &errMsg);
+    if (rcResult != SQLITE_OK) {
+        cerr << "SQL error: " << errMsg << endl;
+        sqlite3_free(errMsg);
+    }
+
+    cout << "Your score: " << score << " out of " << options.size() << endl;
+    return score;
+}
+
+
+// Scoring Function
+
+void displayQuizResults(const string& username) {
+    string query = "SELECT quiz_title, score FROM quiz_results WHERE username = '" + username + "';";
+    sqlite3_stmt* stmt;
+    int rc = sqlite3_prepare_v2(db, query.c_str(), -1, &stmt, nullptr);
+    if (rc != SQLITE_OK) {
+        cerr << "SQL error: " << sqlite3_errmsg(db) << endl;
+        sqlite3_finalize(stmt);
+        return;
+    }
+
+    cout << "Quiz Results for User: " << username << endl;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        string quizTitle = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        int score = sqlite3_column_int(stmt, 1);
+        cout << "Quiz: " << quizTitle << ", Score: " << score << endl;
+    }
+
+    sqlite3_finalize(stmt);
+}
+
+// Function to create a new quiz using SQL
+
+int createQuiz(const string& title, const string& description) {
+    string insertQuizQuery = "INSERT INTO quizzes (title, description) VALUES ('" + title + "', '" + description + "');";
+    char* errMsg;
+    int rc = sqlite3_exec(db, insertQuizQuery.c_str(), nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        cerr << "SQL error: " << errMsg << endl;
+        sqlite3_free(errMsg);
+        return -1; // Quiz creation failed
+    }
+
+    return sqlite3_last_insert_rowid(db); // Return the ID of the newly created quiz
+}
+
+// Function to edit an existing quiz using SQL
+
+bool editQuiz(int quizId, const string& title, const string& description) {
+    string updateQuizQuery = "UPDATE quizzes SET title = '" + title + "', description = '" + description + "' WHERE quiz_id = " + to_string(quizId) + ";";
+    char* errMsg;
+    int rc = sqlite3_exec(db, updateQuizQuery.c_str(), nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        cerr << "SQL error: " << errMsg << endl;
+        sqlite3_free(errMsg);
+        return false; // Quiz edit failed
+    }
+
+    return true; // Quiz edit successful
+}
+
+// Function to delete an existing quiz using SQL
+
+bool deleteQuiz(int quizId) {
+    string deleteQuizQuery = "DELETE FROM quizzes WHERE quiz_id = " + to_string(quizId) + ";";
+    char* errMsg;
+    int rc = sqlite3_exec(db, deleteQuizQuery.c_str(), nullptr, nullptr, &errMsg);
+    if (rc != SQLITE_OK) {
+        cerr << "SQL error: " << errMsg << endl;
+        sqlite3_free(errMsg);
+        return false; // Quiz deletion failed
+    }
+
+    return true; // Quiz deletion successful
+}
+
+
+// User Dashboard Function
+
+void userDashboard(const string& username) {
+    cout << "Welcome, " << username << "!" << endl;
+    cout << "User Dashboard" << endl;
+    cout << "----------------" << endl;
+    cout << "1. Take a Quiz" << endl;
+    cout << "2. View Quiz Results" << endl;
+    cout << "3. Logout" << endl;
+
+    int choice;
+    cout << "Enter your choice: ";
+    cin >> choice;
+
+    switch (choice) {
+        case 1: {
+                string username, password;
+                cout << "Enter a username: ";
+                cin >> username;
+                cout << "Enter a password: ";
+                cin >> password;
+                if (registerUser(username, password)) {
+                    cout << "Registration successful!" << endl;
+                } else {
+                    cout << "Registration failed. User already exists." << endl;
+                }
+                break;
+            }
+        case 2: 
+            displayQuizResults(username);
+            break;
+        case 3:
+            cout << "Logging out..." << endl;
+            break;
+        default:
+            cout << "Invalid choice. Please try again." << endl;
+            break;
+    }
+}
+
+int main() {
+    // Initialize the database
+    initDatabase();
+
+    while (true) {
+        cout << "Online Quiz System" << endl;
+        cout << "------------------" << endl;
+        cout << "1. Register" << endl;
+        cout << "2. Login" << endl;
+        cout << "3. Exit" << endl;
+
+        int choice;
+        cout << "Enter your choice: ";
+        cin >> choice;
+
+        switch (choice) {
+            case 1: {
+                string username, password;
+                cout << "Enter a username: ";
+                cin >> username;
+                cout << "Enter a password: ";
+                cin >> password;
+                if (registerUser(username, password)) {
+                    cout << "Registration successful!" << endl;
+                } else {
+                    cout << "Registration failed. User already exists." << endl;
+                }
+                break;
+            }
+            case 2:
+                // Call your login function here
+                break;
+            case 3:
+                cout << "Exiting..." << endl;
+                return 0; // Exit
+            default:
+                cout << "Invalid choice. Please try again." << endl;
+                break;
+        }
+    }
+
+    // Close the database before exiting (this line should not be reached)
+    sqlite3_close(db);
+
+    return 0;
+}
